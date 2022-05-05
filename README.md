@@ -22,7 +22,8 @@ The script will look for, and create, a folder and file in your home directory c
 
 ## Bulk Edit
 Use the "edit" command to bulk edit the devices file. Uses Nano to edit the file. Exit with Control-X.
-Import from DNA Center
+
+## Import from DNA Center
 Edit the ~/.jump/state.yaml file and add the information in the following format replacing the bracketed sections with the appropriate information:
 ```
 DNAC:
