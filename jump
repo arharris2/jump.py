@@ -1,0 +1,266 @@
+#!/usr/local/bin/python3.9
+try:
+    import sys
+    import os
+    import re
+    import csv
+    import math
+    import subprocess
+    import yaml
+    import json
+    import requests
+    from requests.auth import HTTPBasicAuth
+    import urllib3
+    from rich import print
+except:
+    print("Please ensure that the following python libraries are installed:[red]\nsys\nos\nre\ncsv\nmath\nsubprocess\nyaml\nrequests\nurllib3\njson[/red]")
+    print(sys.path)
+    sys.exit(1)
+
+global home, debug, state
+
+urllib3.disable_warnings()
+
+home = os.path.expanduser("~")
+
+debug = False
+
+if debug: print('Debug is on')
+
+# Check if the files 'devices.csv' and 'state.yaml' exist in the subdirectory ~/.jump or create them if they don't exist
+def check_environment():
+    try:
+        if not os.path.exists(f'{home}/.jump/'):
+            os.makedirs(f'{home}/.jump/')
+        if not os.path.exists(f'{home}/.jump/devices.csv'):
+            seed = open(f'{home}/.jump/devices.csv', 'w')
+            seed.write("ip,name,view,user\n")
+            seed.close()
+    except:
+        print("Failed to create ~/.jump/devices.csv.")
+
+    try:
+        if not os.path.exists(f'{home}/.jump/state.yaml'):
+            seed = open(f'{home}/.jump/state.yaml', 'w')
+            seed.write("view: Default\n")
+            seed.close()
+    except:
+        print("Failed to create ~/.jump/state.yaml.")
+
+# Read devices.csv into memory
+def update_devices():
+    try:
+        stream = open(f'{home}/.jump/devices.csv', 'r')
+        devices = list(csv.DictReader(stream))
+        return devices
+    except:
+        print(f"Could not read {home}/.jump/devices.csv")
+
+# Read state.yaml into memory
+def load_state():
+    global state
+    try:
+        stream = open(f'{home}/.jump/state.yaml', 'r')
+        state = yaml.safe_load(stream)
+        if debug: print(state['DNAC'])
+        return state
+    except:
+        print(f"Could not read {home}/.jump/state.yaml")
+
+# Update the state file after user has changed views
+def update_state(view):
+    global state
+    state = load_state()
+    try:
+        state['view'] = view
+    except:
+        state = {'view': view}
+    with open(f'{home}/.jump/state.yaml', "w") as f:
+        yaml.dump(state, f)
+
+# Add a device to the devices.csv file
+def add_device(ip, name, view, user):
+    stream = open(f'{home}/.jump/devices.csv', 'a')
+    stream.write(f'{ip},{name},{view},{user}\n')
+
+# Function to run system commands
+def system_call(command):
+    p = subprocess.Popen([command], stdout=subprocess.PIPE, shell=True)
+    return p.stdout.read()
+
+# Get the address of the default gateway for use with the 'gateway' command
+def get_gateway_address():
+    return system_call("route -n get default | grep 'gateway' | awk '{print $2}'").decode("utf-8")
+
+def get_dnac_jwt_token():
+    AUTH_URL = '/dna/system/api/v1/auth/token'
+    response = requests.post(state['DNAC'][current_view]['BASE_URL'] + AUTH_URL,
+                             auth=HTTPBasicAuth(state['DNAC'][current_view]['USERNAME'], state['DNAC'][current_view]['PASSWORD']),
+                             verify=False,
+                             timeout=10)
+    token = response.json()['Token']
+    return token
+
+def get_devices_list(headers, query_string_params, page):
+    DEVICES_URL = f'/dna/intent/api/v1/network-device/{page*200+1}/200'
+
+    response = requests.get(state['DNAC'][current_view]['BASE_URL'] + DEVICES_URL,
+                            headers = headers,
+                            params = query_string_params,
+                            verify=False,
+                            timeout=10)
+    return response.json()['response']
+
+def update_device_list_from_DNAC():
+    DEVICES_COUNT_URL = '/dna/intent/api/v1/network-device/count'
+
+    # obtain the Cisco DNA Center Auth Token
+    token = get_dnac_jwt_token()
+    headers = {'X-Auth-Token': token, 'Content-Type': 'application/json'}
+
+    count = requests.get(state['DNAC'][current_view]['BASE_URL'] + DEVICES_COUNT_URL,
+                            headers = headers,
+                            verify=False,
+                            timeout=10)
+    count = count.json()['response']
+
+    associated_username = input(f"Username [{state['DNAC'][current_view]['USERNAME']}]: ")
+    associated_username = associated_username if associated_username else state['DNAC'][current_view]['USERNAME']
+
+    for page in range(math.ceil(count/200)):
+        response = get_devices_list(headers, {}, page)
+        if debug: print(response)
+        for device in response:
+            add_device(device['managementIpAddress'], device['hostname'], current_view, associated_username)
+
+
+def main():
+    # Check that the .jump folder and related files exist if it's the first time running the command
+    check_environment()
+    # Load devices
+    devices = update_devices()
+    # Read the devices file for a list of views associated with devices or set the list to default if there is nothing in the devices file
+    views = list(set(x['view'] for x in devices)) if not devices == [] else ['Default']
+    # Read the last used view from the state file or use the Default view
+    global current_view
+    try:
+        current_view = load_state()['view']
+    except:
+        current_view = "Default"
+    if debug: print(current_view)
+    term_rows, term_columns = os.popen('stty size', 'r').read().split()
+    error = ''
+
+    while True:
+        _ = os.system('clear')
+        print(" 'q' to exit | 'connect [IP Address]' | 'changeto [View Name]' | 'new [View Name]' | 'gateway' | 'console' | 'edit'")
+        print(error) if error else print("")
+        error = ''
+        print(f"Current View - {current_view}")
+        search_string = input("Search: ")
+        if search_string in ["q", "exit"]:
+            break
+        elif re.match("new \w+", search_string, re.IGNORECASE):
+            current_view = search_string.split(' ')[1].title()
+            update_state(current_view)
+            error = f"Created {current_view} view and set as current view."
+        elif re.match("changeto \w+", search_string, re.IGNORECASE):
+            if search_string.split(" ")[1].title() in views:
+                current_view = search_string.split(" ")[1].title()
+                update_state(current_view)
+                error = f'Changing view to {current_view}'
+            else:
+                error = f"No views with the name {search_string.split(' ')[1]}"
+        elif re.match("changeto", search_string, re.IGNORECASE):
+            for num, view in enumerate(views, start=1):
+                print(f"{num} - {view}")
+            change_view = input("Change to: ")
+            while True:
+                if change_view in ["q", "exit"]:
+                    break
+                elif re.match("^\d+$", change_view, re.IGNORECASE):
+                    current_view = views[int(change_view) - 1]
+                    error = f'Changing view to {current_view}'
+                    break
+                elif re.match("^\w+$", change_view):
+                    if change_view.title() in views:
+                        current_view = change_view.title()
+                        update_state(current_view)
+                        error = f'Changing view to {current_view}'
+                        break
+                    else:
+                        error = f"No views with the name {change_view}"
+                        break
+        elif re.match("edit", search_string, re.IGNORECASE):
+            os.system(f"nano {home}/.jump/devices.csv")
+            update_devices()
+        elif re.match("console", search_string, re.IGNORECASE):
+            try:
+                os.system(f"screen /dev/tty.usbserial 9600")
+            except Exception as e:
+                error = f"Error: {e}"
+        elif re.match("connect \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|connect ([a-f0-9]{0,4}:|:?[a-f0-9]{1,4}){1,8}", search_string, re.IGNORECASE):
+            ip = search_string.split(" ")[1]
+            device_user = input("Username (leave blank if same as system): ")
+            os.system(f"ssh {ip}") if device_user == '' else os.system(f"ssh {device_user}@{ip}")
+            device_name = input("Name of device to be added: ")
+            device_name = ip if device_name == "" else device_name
+            add_device(ip, device_name, current_view, device_user)
+            devices = update_devices()
+            views = list(set(x['view'] for x in devices)) if not devices == [] else ['Default']
+        elif re.match("gateway", search_string, re.IGNORECASE):
+            device_user = input("Username (leave blank if same as system): ")
+            ip = get_gateway_address().strip('\n')
+            os.system(f"ssh {get_gateway_address()}") if device_user == '' else os.system(f"ssh {device_user}@{get_gateway_address()}")
+        elif re.match("connect", search_string, re.IGNORECASE):
+            error = "Please enter an IP address to connect to."
+        elif re.match("import dnac", search_string, re.IGNORECASE):
+            try:
+                update_device_list_from_DNAC()
+                devices = update_devices()
+            except:
+                error = f'Unable to import device list from DNA Center.'
+        else:
+            searchlist = list(x for x in devices if re.search(search_string, x['name'], re.IGNORECASE) and x['view'] == current_view) if devices else []
+            searchlist = sorted(searchlist, key = lambda i: i['name'])
+            while True:
+                if len(searchlist)==0:
+                    error = 'There are no devices in this view that match that search.'
+                    break
+                _ = os.system('clear')
+                print("'q' to return to search | Select device by name or number\n")
+                num_columns = 3
+                columns = min(num_columns,len(searchlist))
+                num_of_rows = max(1,math.ceil(len(searchlist)/columns))
+                rows = []
+                for num, x in enumerate(searchlist):
+                    if len(rows)==num % num_of_rows: rows.append([])
+                    rows[int(num % num_of_rows)].append(x['name'])
+                width = int(int(term_columns) / columns) - columns*2
+                #width = 36
+                for rownum,k in enumerate(rows):
+                    output = ""
+                    for num, d in enumerate(k):
+                        output = output+f"[green]{str(num*len(rows)+rownum+1)}[/green]"+" - {:<{width}}".format(d, width=width)
+                    print(output)
+
+
+                print("\nEnter q to return to search")
+                login_choice = input("Login to: ")
+                if login_choice in ["q", "exit"]:
+                    break
+                elif login_choice == "":
+                    pass
+                elif re.match("^\d+$", login_choice) and int(login_choice) <= len(searchlist):
+                    choice = searchlist[int(login_choice) - 1]
+                    connect_to = f"{choice['ip']}" if choice['user']=="" else f"{choice['user']}@{choice['ip']}"
+                    os.system(f"ssh {connect_to}")
+                elif re.match("^.+$", login_choice) and login_choice in (x['name'] for x in searchlist):
+                    print(searchlist)
+                    for choice in searchlist:
+                        if choice['name'] == login_choice:
+                            connect_to = f"{choice['ip']}" if choice['user']=="" else f"{choice['user']}@{choice['ip']}"
+                            os.system(f"ssh {connect_to}")
+
+if __name__ == "__main__":
+    main()
