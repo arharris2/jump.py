@@ -5,7 +5,8 @@ Jump.py is a easy to use terminal server style utility to manage SSH connections
 
 Download "jump"
 
-cd Downloads | chmod +x jump | mv jump /usr/local/bin/
+git clone https://github.com/arharris2/jump.py.git
+cd jump.py | chmod +x jump | sudo mv jump /usr/local/bin/
 
 ## Running Jump.py for the first time:
 
